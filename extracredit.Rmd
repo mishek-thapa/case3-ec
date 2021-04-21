@@ -1,0 +1,86 @@
+---
+title: "extracredit"
+output: html_document
+---
+
+I ran out of shiny sites to host before doing this assignment. 
+
+```{r}
+library(tidyverse)
+library(vroom)
+library(sf)
+library(spdep)
+library(plotly)
+```
+
+
+```{r}
+
+mtvars <- function(df){
+  df %>%
+  dplyr::select(STOP_LOCATION_BORO_NAME, SUSPECT_RACE_DESCRIPTION, SUSPECT_HEIGHT,
+         MONTH2, DAY2, STOP_WAS_INITIATED, SUSPECT_REPORTED_AGE,
+         SUSPECT_SEX, WEAPON_FOUND_FLAG, SUSPECT_WEIGHT,
+         SUSPECT_BODY_BUILD_TYPE, YEAR2,
+         OFFICER_IN_UNIFORM_FLAG, SUSPECTS_ACTIONS_CASING_FLAG, 
+         SUSPECTS_ACTIONS_CONCEALED_POSSESSION_WEAPON_FLAG, SUSPECTS_ACTIONS_DECRIPTION_FLAG,
+         SUSPECTS_ACTIONS_DRUG_TRANSACTIONS_FLAG,SUSPECTS_ACTIONS_IDENTIFY_CRIME_PATTERN_FLAG,
+         SUSPECTS_ACTIONS_LOOKOUT_FLAG, SUSPECTS_ACTIONS_OTHER_FLAG, SUSPECTS_ACTIONS_PROXIMITY_TO_SCENE_FLAG,
+         STOP_LOCATION_PRECINCT)
+}
+
+#vroom data
+data17 <- mtvars(vroom("sqf-2017.csv"))
+data18 <- mtvars(vroom("sqf-2018.csv"))
+data19 <- mtvars(vroom("sqf-2019.csv"))
+
+# code to confirm column names are the same
+# all(colnames(data17) == colnames(data18)) 
+# all(colnames(data17) == colnames(data19))
+
+#bind data
+mydata <- rbind(data17, data18, data19) 
+```
+
+
+
+```{r}
+
+nyp <- st_read("nypp.shx", quiet = T)
+
+nyp <- rename(nyp, precinct = Precinct)
+
+dat_sf <- mydata %>%
+  rename(year = YEAR2, 
+         precinct = STOP_LOCATION_PRECINCT) %>%
+  mutate(precinct = as.numeric(precinct)) %>%
+  group_by(year, precinct) %>%
+  count() %>%
+  right_join(nyp) %>%
+  st_as_sf() %>%
+  mutate(txt = paste("Precinct ", precinct, "\n", n, "SQF Events"))
+
+
+p <- ggplot(dat_sf, aes(fill = (n), frame = year, text = txt)) + 
+    geom_sf() + 
+    scale_fill_viridis_c(option="A") +
+    ggtitle("SQF Events in NY over time") +
+    ggthemes::theme_map()
+
+gg <- p %>%
+  ggplotly(tooltip = "text") %>%
+  style(hoveron = "fill") %>%
+  plotly_build()
+
+gg$x$frames <- lapply(
+  gg$x$frames, function(f) { 
+    f$data <- lapply(f$data, function(d) d[!names(d) %in% c("x", "y")])
+    f 
+  })
+
+gg
+```
+
+
+
+

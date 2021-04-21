@@ -1,0 +1,544 @@
+---
+title: 'Case 3'
+author: 'Mishek Thapa, Tong Wu, Sibora Seranaj and Jessie Ou'
+date: "04/03/2021"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: yes
+  html_document:
+    df_print: paged
+fontsize: 11pt
+geometry: left=1.5cm,right=1.5cm,top=1.5cm,bottom=1.5cm
+---
+
+
+```{r load-packages, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      message = FALSE,
+                      warning = FALSE)
+library(tidyverse)
+library(broom)
+library(rms)
+library(knitr)
+library(modelr)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(spdep)
+library(gtsummary)
+library(car)
+library(spatialreg)
+library(psych)
+library(tidyr)
+ggplot2::theme_set(new = theme_bw())
+```
+
+
+```{r warning=FALSE}
+precinct_pops <- read_csv("precinct_pop.csv") %>%
+  mutate(precinct_white_prop = white/total_pop,
+         precinct_black_prop = black/total_pop,
+         precinct_hispanic_prop = hisp_latino/total_pop,
+         precinct_other_prop = other / total_pop) %>%
+  mutate(dominant_race = case_when(precinct_white_prop > 0.5 ~ "White",
+                                   precinct_black_prop > 0.5 ~ "Black",
+                                   precinct_other_prop > 0.5 ~ "Other",
+                                   precinct_hispanic_prop > 0.5 ~ "Hispanic",
+                                   TRUE ~ "Mixed"
+                                ),
+         dominant_race = as.factor(dominant_race),
+         minority_precinct = as.factor(ifelse(precinct_white_prop > 0.5, "White", "Minority"))) %>%
+  dplyr::select(1,2,7:12)
+```
+
+
+```{r}
+
+data <- read_csv("cpw.csv") 
+
+sex <- data %>%
+  group_by(precinct_2020, SUSPECT_SEX) %>%
+  summarise(n = n()) %>%
+  mutate(male_freq = n / sum(n)) %>%
+  filter(SUSPECT_SEX == "MALE") %>%
+  select(male_freq, precinct_2020)
+  
+race_pct <- data%>%
+  group_by(precinct_2020, suspect_race_generalized) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n)) %>%
+  pivot_wider(id_cols = "precinct_2020",
+    names_from = "suspect_race_generalized",
+    values_from = "freq") %>%
+  rename(
+    blacks_stopped = black,
+    hisp_stopped = hisp_latino,
+    other_stopped = other,
+    white_stopped = white,
+  ) %>%
+  mutate(black_hisp_stopped = blacks_stopped + hisp_stopped)
+
+df <- data %>%
+  group_by(precinct_2020, WEAPON_FOUND_FLAG) %>%
+  summarise(n = n()) %>%
+  mutate(weapon_freq = n / sum(n))  %>%
+  filter(WEAPON_FOUND_FLAG == TRUE) %>%
+  select(precinct_2020, weapon_freq)
+
+df <- df %>%
+  full_join(race_pct, by = c("precinct_2020")) %>%
+  full_join(precinct_pops, by = c("precinct_2020")) %>%
+  full_join(sex, by = c("precinct_2020")) 
+df[is.na(df)] <- 0
+
+
+df <- df %>% 
+  mutate(total_pop = total_pop/10000)
+```
+
+# Introduction  
+
+Stop-Question-Frisk (SQF) is a New York policing protocol, in which officers stop, question, and potentially detain a civilian suspicious of crime. The SQF strategy was introduced to New York City in 2002 and peaked in 2011 with 685,724 stops. The tactic has stirred racial profiling controversy, and many have alleged that the program unfairly targets Black and Hispanic individuals. A 2012 statistical analysis showed that “persons of African and Hispanic descent were stopped more frequently than whites, even after controlling for precinct variability and race-specific estimates of crime participation” (Gelman, Fagan, and Kiss). The SQF practice was sued on behalf of the residents and the policy was found unconstitutional after the 2013 Floyd, et al. v. City of New York lawsuit. The settling mandate required police officers to justify in detail the reason for stopping a civilian. Since 2011, the number of SQF events has fallen, however, there is still concern for ongoing racial profiling or any other disparity in treatment of minority civilians. It is incredibly important to be able to identify the racial profiling, because not only is it unjust, but also because frequent contact with the police may lead to anxiety symptoms and trauma (Geller, Fagan, Tyler, and Link).
+
+The goal of this analysis is to determine whether there may still be evidence of racial disparities in SQF events, taking into consideration the potential spatial effects of precinct -- that is, whether there is evidence of any spatial correlation. We focus on SQF events where the suspected crime was criminal possession of weapons (CPW). Using 4918 CPW events between 2017-2019, we fit a spatial error model to model the precinct-level weapon recovery rate. In terms of precincts, we hypothesize that the weapon discovery rate would be lower for precincts where the proportion of Blacks and Hispanics CPW suspects was higher. 
+
+## Approach 
+
+One common approach to studying racial disparities focuses on disparate impacts – that is, the outcomes of SQF events among different racial groups. Hit rate is defined as the proportion of stops with positive outcomes (arrested, summoned, or some outcome) over the total number of stops. Hit rates are used to evaluate the efficiency of a stop, with lower hit rates corresponding to lower threshold of suspicion for stopping an individual (Ayres 2002a). We focused on SQF stops where the suspected crime was criminal possession of weapons, so our positive outcome would be defined as a weapon found on the suspected individual. This approach was adapted from a 2016 statistical analysis that modelled the ex ante probability that the detained suspect has a weapon (Goel, Rao, and Shroff). Of all kinds of disparities, we chose outcomes disparity to bypass the problem of finding an appropriate baseline to compare race-specific stop/search/frisk rates (Gould and Mastrofski 2004). Of all the positive outcomes, we chose weapon discovery in a CPW event for the reasons listed. First, weapon discovery is a direct indicator of whether a police officer’s suspicion of CPW is justified, whereas a stopped suspect could be arrested or summoned for reasons other than the one he/she was stopped for. Secondly, different crime types have different hit rates, so by focusing on one type of crime (CPW), we control for varying degrees of hit rate among different crime types. Thirdly, focusing on just CPW stops also bypasses the problem of hit rate fallacy, which argues that police are biased against White people, since they have a higher arrest rate.
+
+In order to take into consideration potential spatial effects of precincts, we aggregated all individual CPW stops in a given precinct into a proportion that represents the precinct-level weapon recovery rate. 
+
+As a disclaimer, claims about discrimination require well-designed experiments that control for all other factors to isolate for the effects of race. Our observational dataset lacks such controls, so our findings can only serve as evidence for differential treatment which produces disparate outcomes.
+
+
+## About Data  
+
+The data was directly taken from New York Police Department police officers’ responses to form UF-250 for 36096 stop-and-frisk stops between 2017-2019. The UF-250 form has information about demographics of stopped suspect (race, sex, age, etc.), the time and location of stop (precinct and borough), the rationale for the stop, and any police-suspect interactions (search, frisk, physical force, weapon/contraband found). In addition to SQF police records, we also have population demographics data from the 2020 Census, which lists the population by race in each of NYPD’s 77 precincts. The population data can be joined to police records based on precinct number. In addition, we also utilized a spatial dataset from the NYC Planning website, which includes data on the most recent police precincts boundaries used by the NYPD. Moreover, we also have access to shape files which describe the latest NYPD precinct boundaries. 
+
+## Response Variable 
+The response, or dependent variable was precinct-level weapon recovery rate, that is, the percentage of SQF stops that yielded a positive outcome (weapon found) out of stops where the suspected crime was criminal possession of weapons. 
+
+## Exploratory Data Analysis 
+
+```{r}
+nypp <- st_read("nypp.shx", quiet = T)
+df <- rename(df, Precinct = precinct_2020)
+df_nypp <- merge(nypp, df, by = "Precinct") 
+```
+
+```{r fig.cap="Choropleth map of precinct-level weapon recovery rate in New York. Precinct level weapon discovery rate has some spatial clusters. Other than a couple of outlier points, precincts with similar weapon discovery rate tend to be close together, indicating there is some spatial dependency present", fig.align="center", fig.show="hold"}
+ggplot(df_nypp) + 
+  geom_sf(aes(fill = weapon_freq)) +
+  scale_fill_gradient(low = "#fee8c8", high = "#7f0000") +
+  labs(title = "Weapon Discovery Rate Frequency Has Spatial Clusters",
+       fill = "Proportion") +
+  theme_bw()
+```
+
+
+
+
+
+```{r fig.cap="Precinct-level weapon recovery rate distribution, characterized by composition of precinct. A precinct is defined as White if its percentage of White residents is over 50%, otherwise it is a minority precinct. Precinct 22 has 0 weapon discovery rate, whereas precinct 13 weapon discovery rate is 0.839. The red vertical line represents the mean weapon discovery rate in each group", fig.show="hold"}
+ggplot(df_nypp, aes(x=weapon_freq)) + 
+  geom_histogram(position = "identity", alpha=0.5) + 
+  facet_grid(minority_precinct ~ .) + 
+  labs(title = "Minority precincts have lower average weapon recovery rate",
+       fill = "Minority Precinct") + 
+  xlab("Precinct-level weapon recovery rate") + 
+  ylab("Number of NY precincts") +  
+  geom_vline(data=filter(df_nypp, minority_precinct=="White"), aes(xintercept=0.2386), colour="red") + 
+  geom_text(data=filter(df_nypp, minority_precinct=="White"), aes(x= 0.2386, label="Mean: 0.238", y=5), colour="red") + #text=element_text(size=11)) +
+  geom_vline(data=filter(df_nypp, minority_precinct=="Minority"), aes(xintercept=0.1867), colour="red") + 
+  geom_text(data=filter(df_nypp, minority_precinct=="Minority"), aes(x= 0.186, label="Mean: 0.1867", y=6), colour="red") +
+  theme_bw() 
+```
+
+```{r}
+ols_model <- lm(weapon_freq ~ black_hisp_stopped + male_freq + precinct_hispanic_prop + total_pop + precinct_black_prop + minority_precinct, data = df_nypp)
+ols_output <- tidy(ols_model, conf.int = TRUE)
+ols_tibble <- tibble(res = ols_model$residuals,
+                     fitted = ols_model$fitted.values,
+                     stdres = rstandard(ols_model),
+                     Precinct = df_nypp$Precinct)
+```
+
+
+
+# Methodology 
+
+Results from the global Moron I test for regression residuals showed there was sufficient evidence for spatial clustering among the residuals (p-value = 0.00172). To deal with spatial dependence in regression models, we fit a spatial error model with precinct-level weapon discovery rate as our outcome. In order to decide whether to fit a spatial error or a spatial lag model, we ran the Lagrange Multiplier tests based on the following hypotheses: 
+
+Spatial error model:  
+$$H_0: \lambda  = 0 $$
+$$H_1: \lambda \neq 0$$ 
+
+Spatial lag model: 
+$$H_0: \rho = 0$$
+$$H_1: \rho \neq 0$$
+
+Empirically, there was evidence that spatial dependencies exist in the linear model for error dependence and a missing spatially lagged variable (p-values are 0.01459 and 0.01202, respectively). We chose the spatial error model because we believe the residuals are correlated due to an unmeasured confounding variable and if we were to measure them, we would no longer have issues with spatial dependency. In particular, some potentially unaccounted-for confounders are historic crime rates, patrolling schedule and patrol crew. For example, there is the possibility that neighboring precincts have police officers that all live near each other, which may be associated with their policing patterns. Some police officers might have different policing strategies and make more frequent SQF stops to gather information on crime rate or to enforce police presence in a neighborhood.
+
+However, we note that the choice of spatial error versus spatial lag model is fairly subjective. There is also a justification for the spatial lag model. As a result of potential utility in the spatial lag model, we also consider the spatial lag model as a way to measure the sensitivity of the results from the spatial error model. 
+
+The final form of the spatial error model is: 
+
+\begin{align}
+\text{weapon discovery rate}_i &= \beta_0 + \beta_1 \text{Prop Blacks and Hispanics stopped }_i + \beta_2  \text{Prop males stopped}_i \\
+&+ \beta_4 \text{Prop Hispanics residents}_i + \beta_5 \text{Prop Black residents}_i \\
+&+ \beta_6 \text{MajorityWhite=Yes}_i \\ &+ \beta_7 \text{Total Population}_i + \lambda \mathbf{Wu} + \epsilon
+\end{align}
+
+where i denotes a precinct in NYC, $\mathbf{W}$ denotes the spatial weight matrix, $\lambda$ denotes the coefficient on the spatially correlated errors, $\mathbf{u}$ denotes spatial errors the model is not accounting for, and $\epsilon$ denotes the idiosyncratic error term, $\epsilon \sim N(0, \sigma^2)$.  
+
+
+
+## Model Diagnostics 
+
+Spatial error models relax the standard regression model assumption about the need for errors to be independent. The assumptions for spatial error models are:  
+Linearity between response and each of the predictors 
+Normality in residuals 
+Constant variance in residuals 
+Independence in outcomes of the observations 
+
+We checked our model’s normality in residuals assumptions by plotting Q-Q plots, and we examined the model residuals for non-constant variance and outliers. Furthermore, we checked for linearity assumption for all continuous predictors by generating residuals vs predictor plots. We also calculated Pearson correlation coefficient to detect multicollinearity. Evaluation of model diagnostics can be found in Appendix. 
+
+## Sensitivity analysis 
+
+We also fit a spatial lag model with the same set of predictors, since empirical results from Lagrange Multiplier tests suggest there was sufficient evidence against both null hypotheses. A spatial lag model sees spatial dependence as substantively meaningful. We compare the regression coefficients with those from the spatial lag model as well as those from the OLS model. 
+
+
+```{r include="False"}
+# Moron I test for spatial dependence 
+nypp_sp <- as(df_nypp, "Spatial")
+sp_wts <- poly2nb(nypp_sp)
+sp_wts_mat <- nb2mat(sp_wts, style='W')
+sp_wts_list <- mat2listw(sp_wts_mat, style='W')
+lm.morantest(ols_model, sp_wts_list, alternative = "two.sided")
+```
+
+
+```{r include="False"}
+lm.LMtests(ols_model, sp_wts_list, test = c("LMerr", "LMlag"))
+```
+
+
+```{r include=FALSE}
+# robust LM tests 
+lm.LMtests(ols_model, sp_wts_list, test = c("RLMerr", "RLMlag"))
+```
+
+
+```{r eval=FALSE, include=FALSE}
+# univariate moron I test 
+sp_wts <- poly2nb(df_nypp, row.names=df_nypp$Precinct, queen = T)
+sp_mat <- nb2mat(sp_wts, style='B') # Binary 1/0
+sp_mat_list <-  nb2listw(sp_wts, style='B')
+#moran's I value
+moran(df_nypp$weapon_freq, sp_mat_list, nrow(df_nypp), sum(sp_mat))
+
+sp_mat_list_std <-  nb2listw(sp_wts, style='W')
+moran.plot(df_nypp$weapon_freq, sp_mat_list_std,
+           xlab = "Partially vaccinated proportion",
+           ylab = "Spatially lagged proportion")
+
+```
+
+
+# Results 
+
+The p-value associated with the lambda parameter was statistically significant (p-value = 0.001), adding further evidence that the spatial error model is a better fit than the OLS model. The coefficient estimate associated with lambda is both positive and statistically significant. This means that when weapon discovery rate in neighboring precincts increases, so does the weapon discovery rate in each precinct, even after we adjust for the other explanatory variables in our model.  
+
+
+
+```{r spatial-models}
+m2 <- lagsarlm(weapon_freq ~ black_hisp_stopped + male_freq + total_pop + minority_precinct + precinct_hispanic_prop + precinct_black_prop, data = df_nypp, 
+               listw = sp_wts_list)
+
+m3 <- errorsarlm(weapon_freq ~ black_hisp_stopped + male_freq + total_pop + minority_precinct + precinct_hispanic_prop + precinct_black_prop, data = df_nypp, 
+                 listw = sp_wts_list)
+
+
+m3 %>%
+  tbl_regression(pvalue_fun = ~style_pvalue(.x, digits = 3) ,
+                 estimate_fun = function(x) style_number(x, digits = 3),
+                 intercept = TRUE,
+                 digits = 3,
+                 label = list( black_hisp_stopped ~ "Prop. of CPW Suspects who were Blacks or Hispanics",
+                               male_freq ~ "Prop. of CPW Suspects who were Male",
+                               total_pop ~ "Precinct Population (in 10,000s)",
+                               minority_precinctWhite ~ "Majority White: Yes",
+                               precinct_hispanic_prop ~ "Prop. of Hispanic residents",
+                               precinct_black_prop ~ "Prop. of Black residents"
+                               
+                 )) %>%
+  bold_p(t = 0.05) %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  modify_header(
+    update = list(label ~ "**Variable**",
+                  p.value ~ "**P-Value**")
+  ) %>%
+  as_kable()
+```
+
+
+
+# Discussion
+
+## Interpretation
+
+After accounting for spatial dependence in the errors terms of our model, we ultimately failed to find sufficient evidence supporting our hypothesis that there is a significant association between the precinct-level proportion of blacks and hispanics being stopped and the precinct-level weapon discovery rate. In other words, we failed to find sufficient evidence for racial disparity, measured by precinct-level weapon recovery rate, in our dataset. Holding all else constant, for every 0.01 increase in the precinct-level proportions of blacks and hispanics stopped, the expected weapon discovery rate decreases by 0.049, on average. The direction of association is in line with our hypothesis. However, the 95% confidence interval for this association is (-.213, .114), which includes 0, indicating that this association is not statistically significant. The wide confidence interval (and thus high p-value) associated with our variable of interest might have arisen from having both proportion of Blacks and Hispanics suspects as well as proportion of Hispanic residents as our predictors, which are moderately correlated. 
+
+In addition, we found that all the other predictors we accounted for in our model -- precinct-level frequency of males stopped, total precinct population, precinct-level proportion of hispanics and blacks populations, and whether a precinct is white majority -- had no significant associations with precinct-level weapon discovery rate. 
+
+
+## Sensitivity Analysis (OLS and Spatial)
+
+Similar to the lambda parameter in spatial error model, the coefficient estimate for rho parameter in spatial lag model is both positive and statistically significant. This adds further evidence that there exists positive spatial autocorrelation among the residuals in our model. Either spatial error or spatial lag would be a more appropriate fit than OLS model. However, similar to model output from the spatial error model, none of the predictor variables in the spatial lag model was statistically significantly associated with our response variable. Thus, we conclude that our result regarding SQF disparities is not sensitive to which of the two spatial regression models we used.
+
+
+## Critique on Methodology and Alternative Model Specifications 
+An alternative model can improve upon our model by using Census tracts or even ZIP codes, which might control for more granular location-specific details that our precinct-level data failed to capture. Compared to our precinct-level analysis which only has 77 observations, a more granular location level data could also provide larger sample size and thus reduce the chance of Type 2 error. Our model also lacks explicit information about neighborhood historical crime rate. We relied on neighborhood homogeneity as a proxy for crime rate and assumed that majority White precincts are more likely to be low-crime areas (Massey and Denton 1993). A Census tract level SQF stop data can also be joined with Census data to gather information about neighborhood’s economic and demographic data. 
+
+
+## Limitations 
+
+
+This study’s focus on weapon discovery as the hit rate is unusual. SQF studies have used arrests (Gelman et.al., 2012), but our choice was directed to best answer whether racial skews were observed to exist in NY SQF occurrences at a precinct level. Our hope was to eliminate the bias introduced by using arrest rates since arrest rates are based on police judgement. While weapon discovery rate is more objective and is based on a clearer identifiable observation, this proxy for the police’s expectations of racial groups is also imperfect because it excludes stops that may relate to other crimes such as possession of drugs. As a result, the results of this study may not be generalizable to SQF events overall. 
+
+## Future Work 
+In addition to addressing suggestions in alternative model specifications above-mentioned, we would also want to repeat the same analysis with other types of outcome proportion for a broader picture of outcome disparity, and repeat with other types of spatial regression models to ensure our results and conclusions are technique-agnostic. For example, we can model the precinct-level drug discovery rate in drug-related stops, or the precinct-level arrest rate in all SQF stops. 
+
+
+
+# Bibliography  
+
+Ou, J. (2021), “Case Study 0: Racial Profiling in Stop-Question-Frisk”. Sta440.   
+
+Gelman A, Fagan J, Kiss A (2012), “Stop-and-frisk policy in the context of claims of racial bias.” Journal of the American Statistical Association. 102(479): 813 - 823.  
+
+“Stop, Question and Frisk.” Publications Reports, NYPD. . Last accessed January 20, 2021. https://www1.nyc.gov/site/nypd/stats/reports-analysis/stopfrisk.page  
+
+Goel, Sharad; Rao, Justin M.; Shroff, Ravi (2016), Precinct or prejudice? Understanding racial disparities in New York City’s stop-and-frisk policy. Ann. Appl. Stat. 10, no. 1, 365--394.   
+
+Ayres, I. (2002a), “Outcome Tests of Racial Disparities in Police Practices,” Justice Research and Policy, 4, 131–142. (2002b), Pervasive Prejudice: Unconventional Evidence of Race and Gender Discrimination, Chicago: University of Chicago Press.  
+
+Gould, J., and Mastrofski, S. (2004), “Suspect Searches: Assess Police Behavior Under the U.S. Constitution,” Criminology and Public Policy, 3, 315–361.  
+
+Alpert, G., MacDonald, J. H., and Dunham, R. G. (2005), “Police Suspicion and Discretionary Decision Making During Citizen Stops,” Criminology, 43, 407–434.  
+
+Massey, D., and Denton, N. (1993), American Apartheid: Segregation and the Making of the Underclass, Cambridge, MA: Harvard University Press.  
+
+Smith, M. R., Makarios, M., and Alpert, G. P. (2006), “Differential Suspicion: Theory Specification and Gender Effects in the Traffic Stop Context,” Justice Quarterly, 23, 271–295. 
+
+
+# Appendix 
+
+## Additional EDA: correlation and linearity checks
+```{r fig.cap="Numeric predictors and precinct-level weapon discovery rate linear regression Fit. Scatter plots are below the diagonal, histograms on the diagonal, and the Pearson correlation above the diagonal. All the numeric predictors except total population are proportions. There appears to be a linear relationship between proportion of Blacks stopped and proportion of Hispanics stopped, and also a linear relationship between percentage of Blacks stopped and percentage of Black residents, indicating a need for interaction terms.", fig.height=6, fig.width=8}
+df_nypp_tibble <- as_tibble(df_nypp)
+# code from http://www.sthda.com/english/wiki/scatter-plot-matrices-r-base-graphs
+pairs.panels(df_nypp_tibble[,c("weapon_freq", "black_hisp_stopped", "male_freq", "precinct_hispanic_prop", "precinct_black_prop", "total_pop")],
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE,# show correlation ellipses
+             lm=TRUE,
+             main="Linear Regression Fits: interaction terms needed",
+             labels = c("Weapon discovery rate", "Blacks and Hispanics stopped", "Males stopped", "Hispanic residents", "Black residents", "Total Population")
+             )
+```
+
+
+
+## Model Diagnostics for spatial error model
+
+
+### Constant Variance Assumption
+
+```{r}
+m3_tibble <- tibble(res = m3$residuals, 
+                    fitted = m3$fitted.values,
+                    ) %>%
+  mutate(obs_num = row_number())
+
+#                               stdres = rstandard(ols_model),
+#                               Precinct = df_nypp$Precinct)
+ggplot(data = m3_tibble, aes(x = fitted,
+                             y = res)) + 
+  geom_point() + 
+  labs(x = "Fitted values", y = "Residuals",
+       title = "Constant variance Assumption is met") +
+  geom_hline(yintercept = 0, color = "red")
+```
+
+### Normality Assumption
+
+```{r}
+ggplot(data = m3_tibble, mapping = aes(sample = res)) + 
+  stat_qq() + 
+  stat_qq_line() +
+  labs(title = "Normal QQ Plot of Residuals",
+       subtitle = "Normality assumption is satisfied") + 
+  theme_bw()
+```
+
+### Linearity Assumption
+
+```{r, fig.height=3.5, fig.width=3.5, echo=FALSE}
+library(patchwork)
+df_nypp1 <- df_nypp %>%
+  mutate(m3resd = residuals(m3))
+
+
+ggplot(data = df_nypp1, aes(x = blacks_stopped,
+                            y = m3resd)) + 
+  geom_point() + 
+  labs(x = "Pct Blacks Stopped", y = "Residuals",
+       title = "No pattern observed in  \n Pct Blacks stopped residuals") +
+  geom_hline(yintercept = 0, color = "red") 
+  
+ggplot(data = df_nypp1, aes(x = hisp_stopped,
+                              y = m3resd)) + 
+  geom_point() + 
+  labs(x = "Pct Hispanics Stopped", y = "Residuals",
+       title = "No pattern observed in \n Pct Hispanics stopped residuals") +
+  geom_hline(yintercept = 0, color = "red")
+
+ggplot(data = df_nypp1, aes(x = male_freq,
+                             y = m3resd)) + 
+  geom_point() + 
+  labs(x = "Pct Male Stopped", y = "Residuals",
+       title = "No pattern observed in \n Pct Males stopped residuals") +
+  geom_hline(yintercept = 0, color = "red")
+ggplot(data = df_nypp1, aes(x = total_pop,
+                             y = m3resd)) + 
+  geom_point() + 
+  labs(x = "Total Population", y = "Residuals",
+       title = "No pattern observed in \n total population residuals") +
+  geom_hline(yintercept = 0, color = "red")
+ggplot(data = df_nypp1, aes(x = precinct_hispanic_prop,
+                             y = m3resd)) + 
+  geom_point() + 
+  labs(x = "Precinct Hispanic Proportion", y = "Residuals",
+       title = "No pattern observed in \nPrecint Hispanic prop residuals") +
+  geom_hline(yintercept = 0, color = "red")
+ggplot(data = df_nypp1, aes(x = precinct_black_prop,
+                             y = m3resd)) + 
+  geom_point() + 
+  labs(x = "Precinct Black Proportion", y = "Residuals",
+       title = "No pattern observed in \n Precint Black prop residuals") +
+  geom_hline(yintercept = 0, color = "red")
+
+```
+
+## Sensitivity Analysis 
+
+### Spatial Lag Model 
+Below are the model coefficients for the spatial lag model:
+
+```{r}
+m2%>%
+  tbl_regression(pvalue_fun = ~style_pvalue(.x, digits = 3) ,
+                 estimate_fun = function(x) style_number(x, digits = 3),
+                 intercept = TRUE,
+                 digits = 3,
+                 label = list( black_hisp_stopped ~ "Prop. of CPW Suspects who were Black or Hispanic",
+                               male_freq ~ "Prop. of CPW Suspects who were Male",
+                               total_pop ~ "Precinct Population (in 10,000s)",
+                               minority_precinctWhite ~ "Majority White Precinct",
+                               precinct_hispanic_prop ~ "Prop. of Hispanic residents",
+                               precinct_black_prop ~ "Prop. of Black residents"
+                               
+                 )) %>%
+  bold_p(t = 0.05) %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  modify_header(
+    update = list(label ~ "**Variable**",
+                  p.value ~ "**P-Value**")
+  ) %>%
+  as_kable()
+```
+
+## OLS Output and Model Diagnostics 
+
+
+```{r}
+ols_model %>%
+  tbl_regression(pvalue_fun = ~style_pvalue(.x, digits = 3) ,
+                 estimate_fun = function(x) style_number(x, digits = 3),
+                 intercept = TRUE,
+                 digits = 3,
+                 label = list( black_hisp_stopped ~ "Prop. of CPW Suspects who were Black or Hispanic",
+                               male_freq ~ "Prop. of CPW Suspects who were Male",
+                               total_pop ~ "Precinct Population (in 10,000s)",
+                               minority_precinct ~ "Majority White Precinct",
+                               precinct_hispanic_prop ~ "Prop. of Hispanic residents",
+                               precinct_black_prop ~ "Prop. of Black residents"
+                               
+                 )) %>%
+  bold_p(t = 0.05) %>%
+  bold_labels() %>%
+  italicize_levels() %>%
+  modify_header(
+    update = list(label ~ "**Variable**",
+                  p.value ~ "**P-Value**")
+  ) %>%
+  as_kable()
+
+```
+
+```{r}
+ggplot(data = ols_tibble, aes(x = fitted, 
+                              y = res)) + 
+  geom_point() + 
+  labs(x = "Fitted values", y = "Residuals",
+       title = "non-constant variance in linear model",
+       subtitle="Fan-shaped residuals pattern") +
+  geom_hline(yintercept = 0, color = "red")
+```
+
+```{r}
+ggplot(data = ols_tibble, mapping = aes(sample = res)) + 
+  stat_qq() + 
+  stat_qq_line() +
+  labs(title = "Normal QQ Plot of Residuals",
+       subtitle = "Normality assumption is satisfied") + 
+  theme_bw()
+```
+
+```{r}
+ols_full <- merge(nypp, ols_tibble, by = "Precinct")
+ggplot(ols_full) + 
+  geom_sf(aes(fill = stdres)) +
+  scale_fill_gradient(low = "#fee8c8", high = "#7f0000") +
+  labs(title = "Standardized residuals for linear model",
+       subtitle = "Evidence for spatial clustering",
+       fill = "Std. Resid.") +
+  theme_bw()
+```
+
+
+
+```{r, fig.align="center", fig.cap="VIF values associated with OLS model"}
+
+vifdf <- as.data.frame(vif(ols_model)) %>%
+  rename("VIF Value" = "vif(ols_model)") 
+
+row.names(vifdf) <- c( "Percentage of Blacks/Hispanics Stopped",
+                       "Male Frequency in Precinct",
+                       "Proportion of Hispanics in Precinct",
+                       "Total Population",
+                       "Proportion of Blacks in Precinct",
+                       "Majority White Precint")
+
+vifdf%>%
+  kable(digits = 3)
+
+```
+
+
+
